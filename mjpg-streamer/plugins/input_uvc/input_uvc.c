@@ -45,6 +45,7 @@
 #include "huffman.h"
 #include "jpeg_utils.h"
 #include "dynctrl.h"
+#include "dynctrl-logitech.h"
 //#include "uvcvideo.h"
 
 #define INPUT_PLUGIN_NAME "UVC webcam grabber"
@@ -274,10 +275,12 @@ int input_init(input_parameter *param, int id)
      * for pan/tilt/focus/...
      * dynctrls must get initialized
      */
+/*
     if(dynctrls)
         initDynCtrls(cams[id].videoIn->fd);
-
-    enumerateControls(cams[id].videoIn, cams[id].pglobal, id); // enumerate V4L2 controls after UVC extended mapping
+*/
+//Ignat
+//    enumerateControls(cams[id].videoIn, cams[id].pglobal, id); // enumerate V4L2 controls after UVC extended mapping
 
     return 0;
 }
@@ -369,10 +372,10 @@ void *cam_thread(void *arg)
     pthread_cleanup_push(cam_cleanup, pcontext);
 
     while(!pglobal->stop) {
-        while(pcontext->videoIn->streamingState == STREAMING_PAUSED) {
+      /*  while(pcontext->videoIn->streamingState == STREAMING_PAUSED) {
             usleep(1); // maybe not the best way so FIXME
         }
-
+*/ //Ignat99
         /* grab a frame */
         if(uvcGrab(pcontext->videoIn) < 0) {
             IPRINT("Error grabbing frames\n");

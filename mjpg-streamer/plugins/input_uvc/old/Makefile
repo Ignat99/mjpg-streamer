@@ -29,9 +29,8 @@ all: input_uvc.so
 clean:
 	rm -f *.a *.o core *~ *.so *.lo
 
-# dynctrl.lo
-input_uvc.so: $(OTHER_HEADERS) input_uvc.c v4l2uvc.lo jpeg_utils.lo utils.lo color.lo
-	$(CC) $(CFLAGS) -o $@ input_uvc.c v4l2uvc.lo jpeg_utils.lo utils.lo color.lo $(LFLAGS)
+input_uvc.so: $(OTHER_HEADERS) input_uvc.c v4l2uvc.lo jpeg_utils.lo dynctrl.lo
+	$(CC) $(CFLAGS) -o $@ input_uvc.c v4l2uvc.lo jpeg_utils.lo dynctrl.lo $(LFLAGS)
 
 v4l2uvc.lo: huffman.h uvc_compat.h v4l2uvc.c v4l2uvc.h
 	$(CC) -c $(CFLAGS) -o $@ v4l2uvc.c
@@ -39,12 +38,5 @@ v4l2uvc.lo: huffman.h uvc_compat.h v4l2uvc.c v4l2uvc.h
 jpeg_utils.lo: jpeg_utils.c jpeg_utils.h
 	$(CC) -c $(CFLAGS) -o $@ jpeg_utils.c
 
-# Ignat
-utils.lo: utils.c utils.h
-	$(CC) -c $(CFLAGS) -o $@ utils.c
-
-color.lo: color.c color.h
-	$(CC) -c $(CFLAGS) -o $@ color.c
-
-#dynctrl.lo: dynctrl.c dynctrl.h
-#	$(CC) -c $(CFLAGS) -o $@ dynctrl.c
+dynctrl.lo: dynctrl.c dynctrl.h
+	$(CC) -c $(CFLAGS) -o $@ dynctrl.c

@@ -1,11 +1,9 @@
 /*******************************************************************************
-# Linuc-UVC streaming input-plugin for MJPG-streamer                           #
-#                                                                              #
-# This package work with the Logitech UVC based webcams with the mjpeg feature #
-#                                                                              #
-# Copyright (C) 2005 2006 Laurent Pinchart &&  Michel Xhaard                   #
-#                    2007 Lucas van Staden                                     #
-#                    2007 Tom Stöveken                                         #
+#	 	luvcview: Sdl video Usb Video Class grabber          .         #
+#This package work with the Logitech UVC based webcams with the mjpeg feature. #
+#All the decoding is in user space with the embedded jpeg decoder              #
+#.                                                                             #
+# 		Copyright (C) 2005 2006 Laurent Pinchart &&  Michel Xhaard     #
 #                                                                              #
 # This program is free software; you can redistribute it and/or modify         #
 # it under the terms of the GNU General Public License as published by         #
@@ -23,10 +21,6 @@
 #                                                                              #
 *******************************************************************************/
 
-#ifndef V4L2_UVC_H
-#define V4L2_UVC_H
-
-
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
@@ -37,8 +31,13 @@
 #include <sys/select.h>
 #include <linux/videodev2.h>
 #include "../../mjpg_streamer.h"
-#define NB_BUFFER 4
+#include "avilib.h"
 
+#include "uvcvideo.h"
+#include "dynctrl-logitech.h"
+
+
+#define NB_BUFFER 4
 
 #define IOCTL_RETRY 4
 
@@ -51,23 +50,9 @@
 */
 int xioctl(int fd, int IOCTL_X, void *arg);
 
-#ifdef USE_LIBV4L2
-#include <libv4l2.h>
-#define IOCTL_VIDEO(fd, req, value) v4l2_ioctl(fd, req, value)
-#define OPEN_VIDEO(fd, flags) v4l2_open(fd, flags)
-#define CLOSE_VIDEO(fd) v4l2_close(fd)
-#else
-#define IOCTL_VIDEO(fd, req, value) ioctl(fd, req, value)
-#define OPEN_VIDEO(fd, flags) open(fd, flags)
-#define CLOSE_VIDEO(fd) close(fd)
-#endif
+#define DHT_SIZE 432
 
-typedef enum _streaming_state streaming_state;
-enum _streaming_state {
-    STREAMING_OFF = 0,
-    STREAMING_ON = 1,
-    STREAMING_PAUSED = 2,
-};
+
 
 struct vdIn {
     int fd;
@@ -81,7 +66,7 @@ struct vdIn {
     void *mem[NB_BUFFER];
     unsigned char *tmpbuffer;
     unsigned char *framebuffer;
-    streaming_state streamingState;
+    int isstreaming;
     int grabmethod;
     int width;
     int height;
@@ -102,6 +87,8 @@ struct vdIn {
     FILE *captureFile;
     unsigned int framesWritten;
     unsigned int bytesWritten;
+    avi_t *avifile;
+    char *avifilename;
     int framecount;
     int recordstart;
     int recordtime;
@@ -118,20 +105,35 @@ typedef struct {
 
 context cams[MAX_INPUT_PLUGINS];
 
-int init_videoIn(struct vdIn *vd, char *device, int width, int height, int fps, int format, int grabmethod, globals *pglobal, int id);
-void enumerateControls(struct vdIn *vd, globals *pglobal, int id);
-void control_readed(struct vdIn *vd, struct v4l2_queryctrl *ctrl, globals *pglobal, int id);
-int setResolution(struct vdIn *vd, int width, int height);
+/*
+int
+init_videoIn(struct vdIn *vd, char *device, int width, int height, int fps,
+	     int format, int grabmethod, char *avifilename);
+*///Ignat
+int
+init_videoIn(struct vdIn *vd, char *device, int width, int height, int fps,
+             int format, int grabmethod, globals *pglobal, int id);
+int enum_controls(int vd);
+int save_controls(int vd);
+int load_controls(int vd);
 
 int memcpy_picture(unsigned char *out, unsigned char *buf, int size);
 int uvcGrab(struct vdIn *vd);
 int close_v4l2(struct vdIn *vd);
 
 int v4l2GetControl(struct vdIn *vd, int control);
+//Ignat
 int v4l2SetControl(struct vdIn *vd, int control, int value, int plugin_number, globals *pglobal);
 int v4l2UpControl(struct vdIn *vd, int control);
 int v4l2DownControl(struct vdIn *vd, int control);
 int v4l2ToggleControl(struct vdIn *vd, int control);
 int v4l2ResetControl(struct vdIn *vd, int control);
+int v4l2ResetPanTilt(struct vdIn *vd);
+int v4L2UpDownPan(struct vdIn *vd, short inc);
+int v4L2UpDownTilt(struct vdIn *vd,short inc);
+int v4L2UpDownPanTilt(struct vdIn *vd, short inc_p, short inc_t);
+int v4l2SetLightFrequencyFilter(struct vdIn *vd,int flt);
+int enum_frame_intervals(int dev, __u32 pixfmt, __u32 width, __u32 height);
+int enum_frame_sizes(int dev, __u32 pixfmt);
+int enum_frame_formats(int dev, unsigned int *supported_formats, unsigned int max_formats);
 
-#endif

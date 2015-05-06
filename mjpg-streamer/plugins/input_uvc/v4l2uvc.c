@@ -1,11 +1,9 @@
 /*******************************************************************************
-# Linux-UVC streaming input-plugin for MJPG-streamer                           #
-#                                                                              #
-# This package work with the Logitech UVC based webcams with the mjpeg feature #
-#                                                                              #
-# Copyright (C) 2005 2006 Laurent Pinchart &&  Michel Xhaard                   #
-#                    2007 Lucas van Staden                                     #
-#                    2007 Tom Stöveken                                         #
+#	 	uvcview: Sdl video Usb Video Class grabber           .         #
+#This package work with the Logitech UVC based webcams with the mjpeg feature. #
+#All the decoding is in user space with the embedded jpeg decoder              #
+#.                                                                             #
+# 		Copyright (C) 2005 2006 Laurent Pinchart &&  Michel Xhaard     #
 #                                                                              #
 # This program is free software; you can redistribute it and/or modify         #
 # it under the terms of the GNU General Public License as published by         #
@@ -24,12 +22,19 @@
 *******************************************************************************/
 
 #include <stdlib.h>
-#include <errno.h>
+
 #include "v4l2uvc.h"
-#include "huffman.h"
-#include "dynctrl.h"
+#include "utils.h"
+//Ignat
+//#include "huffman.h"
+
+#define ARRAY_SIZE(a)		(sizeof(a) / sizeof((a)[0]))
+#define FOURCC_FORMAT		"%c%c%c%c"
+#define FOURCC_ARGS(c)		(c) & 0xFF, ((c) >> 8) & 0xFF, ((c) >> 16) & 0xFF, ((c) >> 24) & 0xFF
+	
 
 static int debug = 0;
+
 
 /* ioctl with a number of retries in the case of failure
 * args:
@@ -52,17 +57,61 @@ int xioctl(int fd, int IOCTL_X, void *arg)
     return (ret);
 }
 
+
 static int init_v4l2(struct vdIn *vd);
 
-int init_videoIn(struct vdIn *vd, char *device, int width,
-                 int height, int fps, int format, int grabmethod, globals *pglobal, int id)
+int check_videoIn(struct vdIn *vd, char *device)
 {
-    if(vd == NULL || device == NULL)
-        return -1;
-    if(width == 0 || height == 0)
-        return -1;
-    if(grabmethod < 0 || grabmethod > 1)
-        grabmethod = 1;     //mmap by default;
+	int ret;
+	if (vd == NULL || device == NULL)
+		return -1;
+	vd->videodevice = (char *) calloc(1, 16 * sizeof(char));
+	snprintf(vd->videodevice, 12, "%s", device);
+	printf("Device information:\n");
+	printf("  Device path:  %s\n", vd->videodevice);
+	if ((vd->fd = open(vd->videodevice, O_RDWR)) == -1) {
+		perror("ERROR opening V4L interface");
+		exit(1);
+	}
+	memset(&vd->cap, 0, sizeof(struct v4l2_capability));
+	ret = ioctl(vd->fd, VIDIOC_QUERYCAP, &vd->cap);
+	if (ret < 0) {
+		printf("Error opening device %s: unable to query device.\n",
+				vd->videodevice);
+		goto fatal;
+	}
+	if ((vd->cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) {
+		printf("Error opening device %s: video capture not supported.\n",
+				vd->videodevice);
+	}
+	if (!(vd->cap.capabilities & V4L2_CAP_STREAMING)) {
+		printf("%s does not support streaming i/o\n", vd->videodevice);
+	}
+	if (!(vd->cap.capabilities & V4L2_CAP_READWRITE)) {
+		printf("%s does not support read i/o\n", vd->videodevice);
+	}
+	enum_frame_formats(vd->fd, NULL, 0);
+fatal:    
+	close(vd->fd);
+	free(vd->videodevice);
+	return 0;
+}
+/* int
+init_videoIn(struct vdIn *vd, char *device, int width, int height, int fps, \
+		int format, int grabmethod, char *avifilename)
+*/
+int
+init_videoIn(struct vdIn *vd, char *device, int width, int height, int fps, \
+                int format, int grabmethod, globals *pglobal, int id)
+{
+   int ret = -1;
+    int i;
+    if (vd == NULL || device == NULL)
+	return -1;
+    if (width == 0 || height == 0)
+	return -1;
+    if (grabmethod < 0 || grabmethod > 1)
+	grabmethod = 1;		//mmap by default;
     vd->videodevice = NULL;
     vd->status = NULL;
     vd->pictName = NULL;
@@ -70,7 +119,15 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
     vd->status = (char *) calloc(1, 100 * sizeof(char));
     vd->pictName = (char *) calloc(1, 80 * sizeof(char));
     snprintf(vd->videodevice, 12, "%s", device);
+	printf("Device information:\n");
+	printf("  Device path:  %s\n", vd->videodevice);
     vd->toggleAvi = 0;
+    vd->avifile = NULL;
+//    vd->avifilename = avifilename; //Ignat
+    vd->avifilename = NULL;
+    vd->recordtime = 0;
+    vd->framecount = 0;
+    vd->recordstart = 0;
     vd->getPict = 0;
     vd->signalquit = 1;
     vd->width = width;
@@ -78,9 +135,16 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
     vd->fps = fps;
     vd->formatIn = format;
     vd->grabmethod = grabmethod;
-    if(init_v4l2(vd) < 0) {
-        fprintf(stderr, " Init v4L2 failed !! exit fatal \n");
-        goto error;;
+    vd->fileCounter = 0;
+    vd->rawFrameCapture = 0;
+    vd->rfsBytesWritten = 0;
+    vd->rfsFramesWritten = 0;
+    vd->captureFile = NULL;
+    vd->bytesWritten = 0;
+    vd->framesWritten = 0;
+    if (init_v4l2(vd) < 0) {
+	printf(" Init v4L2 failed !! exit fatal\n");
+	goto error;;
     }
 
 
@@ -93,6 +157,7 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
         currentHeight = currentFormat.fmt.pix.height;
         DBG("Current size: %dx%d\n", currentWidth, currentHeight);
     }
+
 
     pglobal->in[id].in_formats = NULL;
     for(pglobal->in[id].formatCount = 0; 1; pglobal->in[id].formatCount++) {
@@ -128,6 +193,7 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
         pglobal->in[id].in_formats[pglobal->in[id].formatCount].supportedResolutions = NULL;
         pglobal->in[id].in_formats[pglobal->in[id].formatCount].resolutionCount = 0;
         pglobal->in[id].in_formats[pglobal->in[id].formatCount].currentResolution = -1;
+
         while(1) {
             fsenum.index = j;
             j++;
@@ -160,97 +226,300 @@ int init_videoIn(struct vdIn *vd, char *device, int width,
         }
     }
 
+
+
+
     /* alloc a temp buffer to reconstruct the pict */
     vd->framesizeIn = (vd->width * vd->height << 1);
-    switch(vd->formatIn) {
+    switch (vd->formatIn) {
     case V4L2_PIX_FMT_MJPEG:
-        vd->tmpbuffer = (unsigned char *) calloc(1, (size_t) vd->framesizeIn);
-        if(!vd->tmpbuffer)
-            goto error;
-        vd->framebuffer =
-            (unsigned char *) calloc(1, (size_t) vd->width * (vd->height + 8) * 2);
-        break;
+	vd->tmpbuffer =
+	    (unsigned char *) calloc(1, (size_t) vd->framesizeIn);
+	if (!vd->tmpbuffer)
+	    goto error;
+	vd->framebuffer =
+	    (unsigned char *) calloc(1, (size_t) vd->width * (vd->height + 8) * 2);
+	break;
     case V4L2_PIX_FMT_YUYV:
-        vd->framebuffer =
-            (unsigned char *) calloc(1, (size_t) vd->framesizeIn);
-        break;
+	vd->framebuffer =
+	    (unsigned char *) calloc(1, (size_t) vd->framesizeIn);
+	break;
     default:
-        fprintf(stderr, " should never arrive exit fatal !!\n");
-        goto error;
-        break;
-
+	printf(" should never arrive exit fatal !!\n");
+	goto error;
+	break;
     }
-
-    if(!vd->framebuffer)
-        goto error;
+    if (!vd->framebuffer)
+	goto error;
     return 0;
-error:
-    free(pglobal->in[id].in_parameters);
+  error:
     free(vd->videodevice);
     free(vd->status);
     free(vd->pictName);
-    CLOSE_VIDEO(vd->fd);
+    close(vd->fd);
     return -1;
+}
+int enum_controls(int vd) //struct vdIn *vd)
+{    
+  struct v4l2_queryctrl queryctrl;
+  struct v4l2_querymenu querymenu;
+  struct v4l2_control   control_s;
+  struct v4l2_input*    getinput;
+
+  //Name of the device
+  getinput=(struct v4l2_input *) calloc(1, sizeof(struct v4l2_input));
+  memset(getinput, 0, sizeof(struct v4l2_input));
+  getinput->index=0;
+  ioctl(vd,VIDIOC_ENUMINPUT , getinput);
+  printf ("Available controls of device '%s' (Type 1=Integer 2=Boolean 3=Menu 4=Button)\n", getinput->name);
+
+  //subroutine to read menu items of controls with type 3
+  void enumerate_menu (void) {
+    printf ("  Menu items:\n");
+    memset (&querymenu, 0, sizeof (querymenu));
+    querymenu.id = queryctrl.id;
+    for (querymenu.index = queryctrl.minimum;
+         querymenu.index <= queryctrl.maximum;
+         querymenu.index++) {
+      if (0 == ioctl (vd, VIDIOC_QUERYMENU, &querymenu)) {
+        printf ("  index:%d name:%s\n", querymenu.index, querymenu.name);
+	SDL_Delay(10);
+      } else {
+        printf ("error getting control menu");
+        break;
+      }
+    }
+  }
+
+  //predefined controls
+  printf ("V4L2_CID_BASE         (predefined controls):\n");
+  memset (&queryctrl, 0, sizeof (queryctrl));
+  for (queryctrl.id = V4L2_CID_BASE;
+       queryctrl.id < V4L2_CID_LASTP1;
+       queryctrl.id++) {
+    if (0 == ioctl (vd, VIDIOC_QUERYCTRL, &queryctrl)) {
+      if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
+        continue;
+      control_s.id=queryctrl.id;
+      ioctl(vd, VIDIOC_G_CTRL, &control_s);
+      SDL_Delay(10);
+      printf (" index:%-10d name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%-5d now:%d\n",
+              queryctrl.id, queryctrl.name, queryctrl.type, queryctrl.minimum,
+              queryctrl.maximum, queryctrl.step, queryctrl.default_value, control_s.value);
+      if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
+        enumerate_menu ();
+    } else {
+      if (errno == EINVAL)
+        continue;
+      perror ("error getting base controls");
+      goto fatal_controls;
+    }
+  }
+
+  //driver specific controls
+  printf ("V4L2_CID_PRIVATE_BASE (driver specific controls):\n");
+  for (queryctrl.id = V4L2_CID_PRIVATE_BASE;;
+       queryctrl.id++) {
+    if (0 == ioctl (vd, VIDIOC_QUERYCTRL, &queryctrl)) {
+      if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
+        continue;
+      control_s.id=queryctrl.id;
+      ioctl(vd, VIDIOC_G_CTRL, &control_s);
+      SDL_Delay(20);
+      printf (" index:%-10d name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%-5d now:%d\n",
+              queryctrl.id, queryctrl.name, queryctrl.type, queryctrl.minimum,
+              queryctrl.maximum, queryctrl.step, queryctrl.default_value, control_s.value);
+      if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
+        enumerate_menu ();
+    } else {
+      if (errno == EINVAL)
+        break;
+      perror ("error getting private base controls");
+      goto fatal_controls;
+      }
+  }
+  return 0;
+ fatal_controls:
+  return -1;  
+}
+int save_controls(int vd)
+{ 
+  struct v4l2_queryctrl queryctrl;
+  struct v4l2_control   control_s;
+  FILE *configfile;
+  memset (&queryctrl, 0, sizeof (queryctrl));
+  memset (&control_s, 0, sizeof (control_s));
+  configfile = fopen("luvcview.cfg", "w");
+  if ( configfile == NULL) {
+    perror("saving configfile luvcview.cfg failed");
+  }
+  else {
+    fprintf(configfile, "id         value      # luvcview control settings configuration file\n");
+    for (queryctrl.id = V4L2_CID_BASE;
+         queryctrl.id < V4L2_CID_LASTP1;
+         queryctrl.id++) {
+      if (0 == ioctl (vd, VIDIOC_QUERYCTRL, &queryctrl)) {
+        if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
+          continue;
+        control_s.id=queryctrl.id;
+        ioctl(vd, VIDIOC_G_CTRL, &control_s);
+        SDL_Delay(10);
+        fprintf (configfile, "%-10d %-10d # name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%d\n",
+                 queryctrl.id, control_s.value, queryctrl.name, queryctrl.type, queryctrl.minimum,
+                 queryctrl.maximum, queryctrl.step, queryctrl.default_value);
+        printf ("%-10d %-10d # name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%d\n",
+                queryctrl.id, control_s.value, queryctrl.name, queryctrl.type, queryctrl.minimum,
+                queryctrl.maximum, queryctrl.step, queryctrl.default_value);
+        SDL_Delay(10);
+      }
+    }
+    for (queryctrl.id = V4L2_CID_PRIVATE_BASE;;
+         queryctrl.id++) {
+      if (0 == ioctl (vd, VIDIOC_QUERYCTRL, &queryctrl)) {
+        if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
+          continue;
+        if ((queryctrl.id==134217735) || (queryctrl.id==134217736))
+          continue;
+        control_s.id=queryctrl.id;
+        ioctl(vd, VIDIOC_G_CTRL, &control_s);
+        SDL_Delay(10);
+        fprintf (configfile, "%-10d %-10d # name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%d\n",
+                 queryctrl.id, control_s.value, queryctrl.name, queryctrl.type, queryctrl.minimum,
+                 queryctrl.maximum, queryctrl.step, queryctrl.default_value);
+        printf ("%-10d %-10d # name:%-32s type:%d min:%-5d max:%-5d step:%-5d def:%d\n",
+                queryctrl.id, control_s.value, queryctrl.name, queryctrl.type, queryctrl.minimum,
+                queryctrl.maximum, queryctrl.step, queryctrl.default_value);
+      } else {
+        if (errno == EINVAL)
+          break;
+      }
+    }
+    fflush(configfile);
+    fclose(configfile);
+    SDL_Delay(100);
+  }
+}
+
+
+int load_controls(int vd) //struct vdIn *vd)
+{
+  struct v4l2_control   control;
+  FILE *configfile;
+  memset (&control, 0, sizeof (control));
+  configfile = fopen("luvcview.cfg", "r");
+  if ( configfile == NULL) {
+    perror("configfile luvcview.cfg open failed");
+  }
+  else {
+    printf("loading controls from luvcview.cfg\n");
+    char buffer[512]; 
+    fgets(buffer, sizeof(buffer), configfile);
+    while (NULL !=fgets(buffer, sizeof(buffer), configfile) )
+      {
+        sscanf(buffer, "%i%i", &control.id, &control.value);
+        if (ioctl(vd, VIDIOC_S_CTRL, &control))
+          printf("ERROR id:%d val:%d\n", control.id, control.value);
+        else
+          printf("OK    id:%d val:%d\n", control.id, control.value);
+        SDL_Delay(20);
+      }   
+    fclose(configfile);
+  }
 }
 
 static int init_v4l2(struct vdIn *vd)
 {
-    int i;
-    int ret = 0;
-    if((vd->fd = OPEN_VIDEO(vd->videodevice, O_RDWR)) == -1) {
-        perror("ERROR opening V4L interface");
-        DBG("errno: %d", errno);
-        return -1;
-    }
+	int i;
+	int ret = 0;
 
-    memset(&vd->cap, 0, sizeof(struct v4l2_capability));
-    ret = xioctl(vd->fd, VIDIOC_QUERYCAP, &vd->cap);
-    if(ret < 0) {
-        fprintf(stderr, "Error opening device %s: unable to query device.\n", vd->videodevice);
-        goto fatal;
-    }
+	if ((vd->fd = open(vd->videodevice, O_RDWR)) == -1) {
+		perror("ERROR opening V4L interface");
+		exit(1);
+	}
+	memset(&vd->cap, 0, sizeof(struct v4l2_capability));
+	ret = ioctl(vd->fd, VIDIOC_QUERYCAP, &vd->cap);
+	if (ret < 0) {
+		printf("Error opening device %s: unable to query device.\n",
+				vd->videodevice);
+		goto fatal;
+	}
 
-    if((vd->cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) {
-        fprintf(stderr, "Error opening device %s: video capture not supported.\n",
-                vd->videodevice);
-        goto fatal;;
-    }
+	if ((vd->cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) {
+		printf("Error opening device %s: video capture not supported.\n",
+				vd->videodevice);
+		goto fatal;;
+	}
+	if (vd->grabmethod) {
+		if (!(vd->cap.capabilities & V4L2_CAP_STREAMING)) {
+			printf("%s does not support streaming i/o\n", vd->videodevice);
+			goto fatal;
+		}
+	} else {
+		if (!(vd->cap.capabilities & V4L2_CAP_READWRITE)) {
+			printf("%s does not support read i/o\n", vd->videodevice);
+			goto fatal;
+		}
+	}
 
-    if(vd->grabmethod) {
-        if(!(vd->cap.capabilities & V4L2_CAP_STREAMING)) {
-            fprintf(stderr, "%s does not support streaming i/o\n", vd->videodevice);
-            goto fatal;
-        }
-    } else {
-        if(!(vd->cap.capabilities & V4L2_CAP_READWRITE)) {
-            fprintf(stderr, "%s does not support read i/o\n", vd->videodevice);
-            goto fatal;
-        }
-    }
 
-    /*
-     * set format in
-     */
-    memset(&vd->fmt, 0, sizeof(struct v4l2_format));
-    vd->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    vd->fmt.fmt.pix.width = vd->width;
-    vd->fmt.fmt.pix.height = vd->height;
-    vd->fmt.fmt.pix.pixelformat = vd->formatIn;
-    vd->fmt.fmt.pix.field = V4L2_FIELD_ANY;
-    ret = xioctl(vd->fd, VIDIOC_S_FMT, &vd->fmt);
-    if(ret < 0) {
-        fprintf(stderr, "Unable to set format: %d res: %dx%d\n", vd->formatIn, vd->width, vd->height);
-        goto fatal;
-    }
 
-    if((vd->fmt.fmt.pix.width != vd->width) ||
-            (vd->fmt.fmt.pix.height != vd->height)) {
-        fprintf(stderr, "i: The format asked unavailable, so the width %d height %d \n", vd->fmt.fmt.pix.width, vd->fmt.fmt.pix.height);
-        vd->width = vd->fmt.fmt.pix.width;
-        vd->height = vd->fmt.fmt.pix.height;
-        /*
-         * look the format is not part of the deal ???
-         */
+	printf("Stream settings:\n");
+
+	// Enumerate the supported formats to check whether the requested one
+	// is available. If not, we try to fall back to YUYV.
+	unsigned int device_formats[16] = { 0 };	// Assume no device supports more than 16 formats
+	int requested_format_found = 0, fallback_format = -1;
+	if(enum_frame_formats(vd->fd, device_formats, ARRAY_SIZE(device_formats))) {
+		printf("Unable to enumerate frame formats");
+		goto fatal;
+	}
+	for(i = 0; i < ARRAY_SIZE(device_formats) && device_formats[i]; i++) {
+		if(device_formats[i] == vd->formatIn) {
+			requested_format_found = 1;
+			break;
+		}
+		if(device_formats[i] == V4L2_PIX_FMT_MJPEG || device_formats[i] == V4L2_PIX_FMT_YUYV)
+			fallback_format = i;
+	}
+	if(requested_format_found) {
+		// The requested format is supported
+		printf("  Frame format: "FOURCC_FORMAT"\n", FOURCC_ARGS(vd->formatIn));
+	}
+	else if(fallback_format >= 0) {
+		// The requested format is not supported but there's a fallback format
+		printf("  Frame format: "FOURCC_FORMAT" ("FOURCC_FORMAT
+			" is not supported by device)\n",
+			FOURCC_ARGS(device_formats[0]), FOURCC_ARGS(vd->formatIn));
+		vd->formatIn = device_formats[0];
+	}
+	else {
+		// The requested format is not supported and no fallback format is available
+		printf("ERROR: Requested frame format "FOURCC_FORMAT" is not available "
+			"and no fallback format was found.\n", FOURCC_ARGS(vd->formatIn));
+		goto fatal;
+	}
+
+	// Set pixel format and frame size
+	memset(&vd->fmt, 0, sizeof(struct v4l2_format));
+	vd->fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	vd->fmt.fmt.pix.width = vd->width;
+	vd->fmt.fmt.pix.height = vd->height;
+	vd->fmt.fmt.pix.pixelformat = vd->formatIn;
+	vd->fmt.fmt.pix.field = V4L2_FIELD_ANY;
+	ret = ioctl(vd->fd, VIDIOC_S_FMT, &vd->fmt);
+	if (ret < 0) {
+		perror("Unable to set format");
+		goto fatal;
+	}
+	if ((vd->fmt.fmt.pix.width != vd->width) ||
+		(vd->fmt.fmt.pix.height != vd->height)) {
+		printf("  Frame size:   %ux%u (requested size %ux%u is not supported by device)\n",
+			vd->fmt.fmt.pix.width, vd->fmt.fmt.pix.height, vd->width, vd->height);
+		vd->width = vd->fmt.fmt.pix.width;
+		vd->height = vd->fmt.fmt.pix.height;
+		/* look the format is not part of the deal ??? */
+		//vd->formatIn = vd->fmt.fmt.pix.pixelformat;
+//Ignat
         if(vd->formatIn != vd->fmt.fmt.pix.pixelformat) {
             if(vd->formatIn == V4L2_PIX_FMT_MJPEG) {
                 fprintf(stderr, "The inpout device does not supports MJPEG mode\nYou may also try the YUV mode (-yuv option), but it requires a much more CPU power\n");
@@ -262,78 +531,97 @@ static int init_v4l2(struct vdIn *vd)
         } else {
             vd->formatIn = vd->fmt.fmt.pix.pixelformat;
         }
-    }
+//Ignat
+	}
+	else {
+		printf("  Frame size:   %dx%d\n", vd->width, vd->height);
+	}
 
-    /*
-     * set framerate
-     */
-    struct v4l2_streamparm *setfps;
-    setfps = (struct v4l2_streamparm *) calloc(1, sizeof(struct v4l2_streamparm));
-    memset(setfps, 0, sizeof(struct v4l2_streamparm));
-    setfps->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    setfps->parm.capture.timeperframe.numerator = 1;
-    setfps->parm.capture.timeperframe.denominator = vd->fps;
-    ret = xioctl(vd->fd, VIDIOC_S_PARM, setfps);
+	/* set framerate */
+	struct v4l2_streamparm* setfps;  
+	setfps=(struct v4l2_streamparm *) calloc(1, sizeof(struct v4l2_streamparm));
+	memset(setfps, 0, sizeof(struct v4l2_streamparm));
+	setfps->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	setfps->parm.capture.timeperframe.numerator=1;
+	setfps->parm.capture.timeperframe.denominator=vd->fps;
+//Ignat ioctl
+	ret = xioctl(vd->fd, VIDIOC_S_PARM, setfps); 
+	if(ret == -1) {
+		perror("Unable to set frame rate");
+		goto fatal;
+	}
+//Ignat ioctl
+	ret = xioctl(vd->fd, VIDIOC_G_PARM, setfps); 
+	if(ret == 0) {
+		if (setfps->parm.capture.timeperframe.numerator != 1 ||
+			setfps->parm.capture.timeperframe.denominator != vd->fps) {
+			printf("  Frame rate:   %u/%u fps (requested frame rate %u fps is "
+				"not supported by device)\n",
+				setfps->parm.capture.timeperframe.denominator,
+				setfps->parm.capture.timeperframe.numerator,
+				vd->fps);
+		}
+		else {
+			printf("  Frame rate:   %d fps\n", vd->fps);
+		}
+	}
+	else {
+		perror("Unable to read out current frame rate");
+		goto fatal;
+	}
 
-    /*
-     * request buffers
-     */
-    memset(&vd->rb, 0, sizeof(struct v4l2_requestbuffers));
-    vd->rb.count = NB_BUFFER;
-    vd->rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    vd->rb.memory = V4L2_MEMORY_MMAP;
+	/* request buffers */
+	memset(&vd->rb, 0, sizeof(struct v4l2_requestbuffers));
+	vd->rb.count = NB_BUFFER;
+	vd->rb.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	vd->rb.memory = V4L2_MEMORY_MMAP;
 
-    ret = xioctl(vd->fd, VIDIOC_REQBUFS, &vd->rb);
-    if(ret < 0) {
-        perror("Unable to allocate buffers");
-        goto fatal;
-    }
-
-    /*
-     * map the buffers
-     */
-    for(i = 0; i < NB_BUFFER; i++) {
-        memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
-        vd->buf.index = i;
-        vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        vd->buf.memory = V4L2_MEMORY_MMAP;
-        ret = xioctl(vd->fd, VIDIOC_QUERYBUF, &vd->buf);
-        if(ret < 0) {
-            perror("Unable to query buffer");
-            goto fatal;
-        }
-
-        if(debug)
-            fprintf(stderr, "length: %u offset: %u\n", vd->buf.length, vd->buf.m.offset);
-
-        vd->mem[i] = mmap(0 /* start anywhere */ ,
-                          vd->buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, vd->fd,
-                          vd->buf.m.offset);
-        if(vd->mem[i] == MAP_FAILED) {
-            perror("Unable to map buffer");
-            goto fatal;
-        }
-        if(debug)
-            fprintf(stderr, "Buffer mapped at address %p.\n", vd->mem[i]);
-    }
-
-    /*
-     * Queue the buffers.
-     */
-    for(i = 0; i < NB_BUFFER; ++i) {
-        memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
-        vd->buf.index = i;
-        vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        vd->buf.memory = V4L2_MEMORY_MMAP;
-        ret = xioctl(vd->fd, VIDIOC_QBUF, &vd->buf);
-        if(ret < 0) {
-            perror("Unable to queue buffer");
-            goto fatal;;
-        }
-    }
-    return 0;
+//Ignat ioctl
+	ret = xioctl(vd->fd, VIDIOC_REQBUFS, &vd->rb);
+	if (ret < 0) {
+		perror("Unable to allocate buffers");
+		goto fatal;
+	}
+	/* map the buffers */
+	for (i = 0; i < NB_BUFFER; i++) {
+		memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
+		vd->buf.index = i;
+		vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		vd->buf.memory = V4L2_MEMORY_MMAP;
+		ret = ioctl(vd->fd, VIDIOC_QUERYBUF, &vd->buf);
+		if (ret < 0) {
+			perror("Unable to query buffer");
+			goto fatal;
+		}
+		if (debug)
+			printf("length: %u offset: %u\n", vd->buf.length,
+					vd->buf.m.offset);
+//Ignat PROT_READ  , MAP_SHARED
+		vd->mem[i] = mmap(0 /* start anywhere */ ,
+				vd->buf.length, PROT_READ | PROT_WRITE , MAP_SHARED, vd->fd,
+				vd->buf.m.offset);
+		if (vd->mem[i] == MAP_FAILED) {
+			perror("Unable to map buffer");
+			goto fatal;
+		}
+		if (debug)
+			printf("Buffer mapped at address %p.\n", vd->mem[i]);
+	}
+	/* Queue the buffers. */
+	for (i = 0; i < NB_BUFFER; ++i) {
+		memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
+		vd->buf.index = i;
+		vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		vd->buf.memory = V4L2_MEMORY_MMAP;
+		ret = ioctl(vd->fd, VIDIOC_QBUF, &vd->buf);
+		if (ret < 0) {
+			perror("Unable to queue buffer");
+			goto fatal;;
+		}
+	}
+	return 0;
 fatal:
-    return -1;
+	return -1;
 
 }
 
@@ -342,27 +630,26 @@ static int video_enable(struct vdIn *vd)
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     int ret;
 
-    ret = xioctl(vd->fd, VIDIOC_STREAMON, &type);
-    if(ret < 0) {
-        perror("Unable to start capture");
-        return ret;
+    ret = ioctl(vd->fd, VIDIOC_STREAMON, &type);
+    if (ret < 0) {
+	perror("Unable to start capture");
+	return ret;
     }
-    vd->streamingState = STREAMING_ON;
+    vd->isstreaming = 1;
     return 0;
 }
 
-static int video_disable(struct vdIn *vd, streaming_state disabledState)
+static int video_disable(struct vdIn *vd)
 {
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     int ret;
-    DBG("STopping capture\n");
-    ret = xioctl(vd->fd, VIDIOC_STREAMOFF, &type);
-    if(ret != 0) {
-        perror("Unable to stop capture");
-        return ret;
+
+    ret = ioctl(vd->fd, VIDIOC_STREAMOFF, &type);
+    if (ret < 0) {
+	perror("Unable to stop capture");
+	return ret;
     }
-    DBG("STopping capture done\n");
-    vd->streamingState = disabledState;
+    vd->isstreaming = 0;
     return 0;
 }
 
@@ -371,7 +658,8 @@ Description.:
 Input Value.:
 Return Value:
 ******************************************************************************/
-int is_huffman(unsigned char *buf)
+
+int is_huffman1(unsigned char *buf)
 {
     unsigned char *ptbuf;
     int i = 0;
@@ -386,6 +674,48 @@ int is_huffman(unsigned char *buf)
     return 0;
 }
 
+//Ignat
+
+const static unsigned char dht_data[] = {
+    0xff, 0xc4, 0x01, 0xa2, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02,
+    0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x01, 0x00, 0x03,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+    0x0a, 0x0b, 0x10, 0x00, 0x02, 0x01, 0x03, 0x03, 0x02, 0x04, 0x03, 0x05,
+    0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7d, 0x01, 0x02, 0x03, 0x00, 0x04,
+    0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07, 0x22,
+    0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08, 0x23, 0x42, 0xb1, 0xc1, 0x15,
+    0x52, 0xd1, 0xf0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x34, 0x35, 0x36,
+    0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
+    0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66,
+    0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a,
+    0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95,
+    0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8,
+    0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2,
+    0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4, 0xd5,
+    0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+    0xe8, 0xe9, 0xea, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+    0xfa, 0x11, 0x00, 0x02, 0x01, 0x02, 0x04, 0x04, 0x03, 0x04, 0x07, 0x05,
+    0x04, 0x04, 0x00, 0x01, 0x02, 0x77, 0x00, 0x01, 0x02, 0x03, 0x11, 0x04,
+    0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71, 0x13, 0x22,
+    0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33,
+    0x52, 0xf0, 0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34, 0xe1, 0x25,
+    0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x35, 0x36,
+    0x37, 0x38, 0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
+    0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x63, 0x64, 0x65, 0x66,
+    0x67, 0x68, 0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a,
+    0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x92, 0x93, 0x94,
+    0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba,
+    0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4,
+    0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+    0xe8, 0xe9, 0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa
+};
+
+
+
 /******************************************************************************
 Description.:
 Input Value.:
@@ -396,7 +726,7 @@ int memcpy_picture(unsigned char *out, unsigned char *buf, int size)
     unsigned char *ptdeb, *ptlimit, *ptcur = buf;
     int sizein, pos = 0;
 
-    if(!is_huffman(buf)) {
+    if(!is_huffman1(buf)) {
         ptdeb = ptcur = buf;
         ptlimit = buf + size;
         while((((ptcur[0] << 8) | ptcur[1]) != 0xffc0) && (ptcur < ptlimit))
@@ -419,73 +749,156 @@ int uvcGrab(struct vdIn *vd)
 #define HEADERFRAME1 0xaf
     int ret;
 
-    if(vd->streamingState == STREAMING_OFF) {
-        if(video_enable(vd))
-            goto err;
-    }
+    if (!vd->isstreaming)
+	if (video_enable(vd))
+	    goto err;
+
     memset(&vd->buf, 0, sizeof(struct v4l2_buffer));
     vd->buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     vd->buf.memory = V4L2_MEMORY_MMAP;
-
+//Ignat ioctl
     ret = xioctl(vd->fd, VIDIOC_DQBUF, &vd->buf);
-    if(ret < 0) {
-        perror("Unable to dequeue buffer");
-        goto err;
+    if (ret < 0) {
+	perror("Unable to dequeue buffer");
+	goto err;
     }
 
-    switch(vd->formatIn) {
+	/* Capture a single raw frame */
+	if (vd->rawFrameCapture && vd->buf.bytesused > 0) {
+		FILE *frame = NULL;
+		char filename[13];
+		int ret;
+
+		/* Disable frame capturing unless we're in frame stream mode */
+		if(vd->rawFrameCapture == 1)
+			vd->rawFrameCapture = 0;
+
+		/* Create a file name and open the file */
+		sprintf(filename, "frame%03u.raw", vd->fileCounter++ % 1000);
+		frame = fopen(filename, "wb");
+		if(frame == NULL) {
+			perror("Unable to open file for raw frame capturing");
+			goto end_capture;
+		}
+		
+		/* Write the raw data to the file */
+		ret = fwrite(vd->mem[vd->buf.index], vd->buf.bytesused, 1, frame);
+		if(ret < 1) {
+			perror("Unable to write to file");
+			goto end_capture;
+		}
+		printf("Saved raw frame to %s (%u bytes)\n", filename, vd->buf.bytesused);
+		if(vd->rawFrameCapture == 2) {
+			vd->rfsBytesWritten += vd->buf.bytesused;
+			vd->rfsFramesWritten++;
+		}
+
+
+		/* Clean up */
+end_capture:
+		if(frame)
+			fclose(frame);
+	}
+
+   
+
+	/* Capture raw stream data */
+	if (vd->captureFile && vd->buf.bytesused > 0) {
+		int ret;
+		ret = fwrite(vd->mem[vd->buf.index], vd->buf.bytesused, 1, vd->captureFile);
+		if (ret < 1) {
+			perror("Unable to write raw stream to file");
+			fprintf(stderr, "Stream capturing terminated.\n");
+			fclose(vd->captureFile);
+			vd->captureFile = NULL;
+			vd->framesWritten = 0;
+			vd->bytesWritten = 0;
+		} else {
+			vd->framesWritten++;
+			vd->bytesWritten += vd->buf.bytesused;
+			if (debug)
+				printf("Appended raw frame to stream file (%u bytes)\n", vd->buf.bytesused);
+		}
+	}
+
+    switch (vd->formatIn) {
     case V4L2_PIX_FMT_MJPEG:
-        if(vd->buf.bytesused <= HEADERFRAME1) {
-            /* Prevent crash
-                                                        * on empty image */
-            fprintf(stderr, "Ignoring empty buffer ...\n");
-            return 0;
+        if(vd->buf.bytesused <= HEADERFRAME1) {	/* Prevent crash on empty image */
+/*	    if(debug)*/
+	        printf("Ignoring empty buffer ...\n");
+	    return 0;
         }
-
-        /* memcpy(vd->tmpbuffer, vd->mem[vd->buf.index], vd->buf.bytesused);
-
-        memcpy (vd->tmpbuffer, vd->mem[vd->buf.index], HEADERFRAME1);
+	memcpy(vd->tmpbuffer, vd->mem[vd->buf.index],vd->buf.bytesused);
+//Ignat
+	memcpy (vd->tmpbuffer, vd->mem[vd->buf.index], HEADERFRAME1);
         memcpy (vd->tmpbuffer + HEADERFRAME1, dht_data, sizeof(dht_data));
         memcpy (vd->tmpbuffer + HEADERFRAME1 + sizeof(dht_data), vd->mem[vd->buf.index] + HEADERFRAME1, (vd->buf.bytesused - HEADERFRAME1));
-        */
+//Ignat
 
-        memcpy(vd->tmpbuffer, vd->mem[vd->buf.index], vd->buf.bytesused);
 
-        if(debug)
-            fprintf(stderr, "bytes in used %d \n", vd->buf.bytesused);
-        break;
 
-    case V4L2_PIX_FMT_YUYV:
-        if(vd->buf.bytesused > vd->framesizeIn)
-            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->framesizeIn);
-        else
-            memcpy(vd->framebuffer, vd->mem[vd->buf.index], (size_t) vd->buf.bytesused);
-        break;
 
-    default:
-        goto err;
-        break;
+
+	 /* avi recording is toggled on */
+    if (vd->toggleAvi) {
+        /* if vd->avifile is NULL, then we need to initialize it */
+        if (vd->avifile == NULL) {
+            vd->avifile = AVI_open_output_file(vd->avifilename);
+
+            /* if avifile is NULL, there was an error */
+            if (vd->avifile == NULL ) {
+                fprintf(stderr,"Error opening avifile %s\n",vd->avifilename);
+            }
+            else {
+                /* we default the fps to 15, we'll reset it on close */
+                AVI_set_video(vd->avifile, vd->width, vd->height,
+                    15, "MJPG");
+                printf("recording to %s\n",vd->avifilename);
+            }
+        } else {
+        /* if we have a valid avifile, record the frame to it */
+            AVI_write_frame(vd->avifile, vd->tmpbuffer,
+                vd->buf.bytesused, vd->framecount);
+            vd->framecount++;
+        }
     }
-
-    ret = xioctl(vd->fd, VIDIOC_QBUF, &vd->buf);
-    if(ret < 0) {
-        perror("Unable to requeue buffer");
-        goto err;
+	if (jpeg_decode(&vd->framebuffer, vd->tmpbuffer, &vd->width,
+	     &vd->height) < 0) {
+	    printf("jpeg decode errors\n");
+	    goto err;
+	}
+	if (debug)
+	    printf("bytes in used %d\n", vd->buf.bytesused);
+	break;
+    case V4L2_PIX_FMT_YUYV:
+	if (vd->buf.bytesused > vd->framesizeIn)
+	    memcpy(vd->framebuffer, vd->mem[vd->buf.index],
+		   (size_t) vd->framesizeIn);
+	else
+	    memcpy(vd->framebuffer, vd->mem[vd->buf.index],
+		   (size_t) vd->buf.bytesused);
+	break;
+    default:
+	goto err;
+	break;
+    }
+    ret = ioctl(vd->fd, VIDIOC_QBUF, &vd->buf);
+    if (ret < 0) {
+	perror("Unable to requeue buffer");
+	goto err;
     }
 
     return 0;
-
-err:
+  err:
     vd->signalquit = 0;
     return -1;
 }
-
 int close_v4l2(struct vdIn *vd)
 {
-    if(vd->streamingState == STREAMING_ON)
-        video_disable(vd, STREAMING_OFF);
-    if(vd->tmpbuffer)
-        free(vd->tmpbuffer);
+    if (vd->isstreaming)
+	video_disable(vd);
+    if (vd->tmpbuffer)
+	free(vd->tmpbuffer);
     vd->tmpbuffer = NULL;
     free(vd->framebuffer);
     vd->framebuffer = NULL;
@@ -495,35 +908,25 @@ int close_v4l2(struct vdIn *vd)
     vd->videodevice = NULL;
     vd->status = NULL;
     vd->pictName = NULL;
-
-    return 0;
 }
 
 /* return >= 0 ok otherwhise -1 */
-static int isv4l2Control(struct vdIn *vd, int control, struct v4l2_queryctrl *queryctrl)
+static int isv4l2Control(struct vdIn *vd, int control,
+			 struct v4l2_queryctrl *queryctrl)
 {
-    int err = 0;
-
+int err =0;
     queryctrl->id = control;
-    if((err = xioctl(vd->fd, VIDIOC_QUERYCTRL, queryctrl)) < 0) {
-        //fprintf(stderr, "ioctl querycontrol error %d \n",errno);
-        return -1;
+    if ((err= ioctl(vd->fd, VIDIOC_QUERYCTRL, queryctrl)) < 0) {
+	perror("ioctl querycontrol error");
+    } else if (queryctrl->flags & V4L2_CTRL_FLAG_DISABLED) {
+	printf("control %s disabled\n", (char *) queryctrl->name);
+    } else if (queryctrl->flags & V4L2_CTRL_TYPE_BOOLEAN) {
+	return 1;
+    } else if (queryctrl->type & V4L2_CTRL_TYPE_INTEGER) {
+	return 0;
+    } else {
+	printf("contol %s unsupported\n", (char *) queryctrl->name);
     }
-
-    if(queryctrl->flags & V4L2_CTRL_FLAG_DISABLED) {
-        //fprintf(stderr, "control %s disabled \n", (char *) queryctrl->name);
-        return -1;
-    }
-
-    if(queryctrl->type & V4L2_CTRL_TYPE_BOOLEAN) {
-        return 1;
-    }
-
-    if(queryctrl->type & V4L2_CTRL_TYPE_INTEGER) {
-        return 0;
-    }
-
-    fprintf(stderr, "contol %s unsupported  \n", (char *) queryctrl->name);
     return -1;
 }
 
@@ -532,330 +935,438 @@ int v4l2GetControl(struct vdIn *vd, int control)
     struct v4l2_queryctrl queryctrl;
     struct v4l2_control control_s;
     int err;
-
-    if((err = isv4l2Control(vd, control, &queryctrl)) < 0) {
-        return -1;
-    }
-
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;
     control_s.id = control;
-    if((err = xioctl(vd->fd, VIDIOC_G_CTRL, &control_s)) < 0) {
-        return -1;
+    if ((err = ioctl(vd->fd, VIDIOC_G_CTRL, &control_s)) < 0) {
+	printf("ioctl get control error\n");
+	return -1;
     }
-
     return control_s.value;
 }
 
-int v4l2SetControl(struct vdIn *vd, int control_id, int value, int plugin_number, globals *pglobal)
+int v4l2SetControl(struct vdIn *vd, int control, int value, int plugin_number, globals *pglobal)
 {
     struct v4l2_control control_s;
-    int min, max;
-    int ret = 0;
+    struct v4l2_queryctrl queryctrl;
+    int min, max, step, val_def;
     int err;
-    int i;
-    int got = -1;
-    DBG("Looking for the %d V4L2 control\n", control_id);
-    for (i = 0; i<pglobal->in[plugin_number].parametercount; i++) {
-        if (pglobal->in[plugin_number].in_parameters[i].ctrl.id == control_id) {
-            got = 0;
-            break;
-        }
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;
+    min = queryctrl.minimum;
+    max = queryctrl.maximum;
+    step = queryctrl.step;
+    val_def = queryctrl.default_value;
+    if ((value >= min) && (value <= max)) {
+	control_s.id = control;
+	control_s.value = value;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	    printf("ioctl set control error\n");
+	    return -1;
+	}
     }
-
-    if (got == 0) { // we have found the control with the specified id
-        DBG("V4L2 ctrl %d found\n", control_id);
-        if (pglobal->in[plugin_number].in_parameters[i].class_id == V4L2_CTRL_CLASS_USER) {
-            DBG("Control type: USER\n");
-            min = pglobal->in[plugin_number].in_parameters[i].ctrl.minimum;
-            max = pglobal->in[plugin_number].in_parameters[i].ctrl.maximum;
-
-            if((value >= min) && (value <= max)) {
-                control_s.id = control_id;
-                control_s.value = value;
-                if((err = xioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
-                    DBG("VIDIOC_S_CTRL failed\n");
-                    return -1;
-                } else {
-                    DBG("V4L2 ctrl %d new value: %d\n", control_id, value);
-                    pglobal->in[plugin_number].in_parameters[i].value = value;
-                }
-            } else {
-                DBG("Value (%d) out of range (%d .. %d)\n", value, min, max);
-            }
-            return 0;
-        } else { // not user class controls
-            DBG("Control type: EXTENDED\n");
-            struct v4l2_ext_controls ext_ctrls = {0};
-            struct v4l2_ext_control ext_ctrl = {0};
-            ext_ctrl.id = pglobal->in[plugin_number].in_parameters[i].ctrl.id;
-
-            switch(pglobal->in[plugin_number].in_parameters[i].ctrl.type) {
-#ifdef V4L2_CTRL_TYPE_STRING
-                case V4L2_CTRL_TYPE_STRING:
-                    //string gets set on VIDIOC_G_EXT_CTRLS
-                    //add the maximum size to value
-                    ext_ctrl.size = value;
-                    DBG("STRING extended controls are currently broken\n");
-                    //ext_ctrl.string = control->string; // FIXMEE
-                    break;
-#endif
-                case V4L2_CTRL_TYPE_INTEGER64:
-                    ext_ctrl.value64 = value;
-                    break;
-                default:
-                    ext_ctrl.value = value;
-                    break;
-            }
-
-            ext_ctrls.count = 1;
-            ext_ctrls.controls = &ext_ctrl;
-            ret = xioctl(vd->fd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
-            if(ret) {
-                DBG("control id: 0x%08x failed to set value (error %i)\n", ext_ctrl.id, ret);
-                return -1;
-            } else {
-                DBG("control id: %d new value: %d\n", ext_ctrl.id, ext_ctrl.value);
-            }
-            return 0;
-        }
-    } else {
-        DBG("Invalid V4L2_set_control request for the id: %d. Control cannot be found in the list\n", control_id);
-        return -1;
-    }
+    return 0;
 }
+int v4l2UpControl(struct vdIn *vd, int control)
+{
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int min, max, current, step, val_def;
+    int err;
 
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;
+    min = queryctrl.minimum;
+    max = queryctrl.maximum;
+    step = queryctrl.step;
+    val_def = queryctrl.default_value;
+    current = v4l2GetControl(vd, control);
+    current += step;
+    printf("max %d, min %d, step %d, default %d ,current %d\n",max,min,step,val_def,current);
+    if (current <= max) {
+	control_s.id = control;
+	control_s.value = current;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	    printf("ioctl set control error\n");
+	    return -1;
+	}            
+        printf ("Control name:%s set to value:%d\n", queryctrl.name, control_s.value);
+    } else {
+      printf ("Control name:%s already has max value:%d\n", queryctrl.name, max); 
+    }
+     return control_s.value;
+}
+int v4l2DownControl(struct vdIn *vd, int control)
+{
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int min, max, current, step, val_def;
+    int err;
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;
+    min = queryctrl.minimum;
+    max = queryctrl.maximum;
+    step = queryctrl.step;
+    val_def = queryctrl.default_value;
+    current = v4l2GetControl(vd, control);
+    current -= step;
+    printf("max %d, min %d, step %d, default %d ,current %d\n",max,min,step,val_def,current);
+    if (current >= min) {
+	control_s.id = control;
+	control_s.value = current;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	    printf("ioctl set control error\n");
+	    return -1;
+	}
+    printf ("Control name:%s set to value:%d\n", queryctrl.name, control_s.value);
+    }
+    else {
+      printf ("Control name:%s already has min value:%d\n", queryctrl.name, min); 
+    }
+    return control_s.value;
+}
+int v4l2ToggleControl(struct vdIn *vd, int control)
+{
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int current;
+    int err;
+    if (isv4l2Control(vd, control, &queryctrl) != 1)
+	return -1;
+    current = v4l2GetControl(vd, control);
+    control_s.id = control;
+    control_s.value = !current;
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl toggle control error\n");
+	return -1;
+    }
+    return control_s.value;
+}
 int v4l2ResetControl(struct vdIn *vd, int control)
 {
     struct v4l2_control control_s;
     struct v4l2_queryctrl queryctrl;
     int val_def;
     int err;
-
-    if(isv4l2Control(vd, control, &queryctrl) < 0)
-        return -1;
-
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;
     val_def = queryctrl.default_value;
     control_s.id = control;
     control_s.value = val_def;
-
-    if((err = xioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
-        return -1;
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl reset control error\n");
+	return -1;
     }
 
     return 0;
-};
-
-void control_readed(struct vdIn *vd, struct v4l2_queryctrl *ctrl, globals *pglobal, int id)
-{
-    struct v4l2_control c;
-    c.id = ctrl->id;
-    if (pglobal->in[id].in_parameters == NULL) {
-        pglobal->in[id].in_parameters = (control*)calloc(1, sizeof(control));
-    } else {
-        pglobal->in[id].in_parameters =
-        (control*)realloc(pglobal->in[id].in_parameters,(pglobal->in[id].parametercount + 1) * sizeof(control));
-    }
-
-    if (pglobal->in[id].in_parameters == NULL) {
-        DBG("Calloc failed\n");
-        return;
-    }
-
-    memcpy(&pglobal->in[id].in_parameters[pglobal->in[id].parametercount].ctrl, ctrl, sizeof(struct v4l2_queryctrl));
-    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].group = IN_CMD_V4L2;
-    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = c.value;
-    if(ctrl->type == V4L2_CTRL_TYPE_MENU) {
-        pglobal->in[id].in_parameters[pglobal->in[id].parametercount].menuitems =
-            (struct v4l2_querymenu*)malloc((ctrl->maximum + 1) * sizeof(struct v4l2_querymenu));
-        int i;
-        for(i = ctrl->minimum; i <= ctrl->maximum; i++) {
-            struct v4l2_querymenu qm;
-            qm.id = ctrl->id;
-            qm.index = i;
-            if(xioctl(vd->fd, VIDIOC_QUERYMENU, &qm) == 0) {
-                memcpy(&pglobal->in[id].in_parameters[pglobal->in[id].parametercount].menuitems[i], &qm, sizeof(struct v4l2_querymenu));
-                DBG("Menu item %d: %s\n", qm.index, qm.name);
-            } else {
-                DBG("Unable to get menu item for %s, index=%d\n", ctrl->name, qm.index);
-            }
-        }
-    } else {
-        pglobal->in[id].in_parameters[pglobal->in[id].parametercount].menuitems = NULL;
-    }
-
-    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = 0;
-#ifdef V4L2_CTRL_FLAG_NEXT_CTRL
-    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].class_id = (ctrl->id & 0xFFFF0000);
-#else
-    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].class_id = V4L2_CTRL_CLASS_USER;
-#endif
-
-    int ret = -1;
-    if (pglobal->in[id].in_parameters[pglobal->in[id].parametercount].class_id == V4L2_CTRL_CLASS_USER) {
-        DBG("V4L2 parameter found: %s value %d Class: USER \n", ctrl->name, c.value);
-        ret = xioctl(vd->fd, VIDIOC_G_CTRL, &c);
-        if(ret == 0) {
-            pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = c.value;
-        } else {
-            DBG("Unable to get the value of %s retcode: %d  %s\n", ctrl->name, ret, strerror(errno));
-        }
-    } else {
-        DBG("V4L2 parameter found: %s value %d Class: EXTENDED \n", ctrl->name, c.value);
-        struct v4l2_ext_controls ext_ctrls = {0};
-        struct v4l2_ext_control ext_ctrl = {0};
-        ext_ctrl.id = ctrl->id;
-#ifdef V4L2_CTRL_TYPE_STRING
-        ext_ctrl.size = 0;
-        if(ctrl.type == V4L2_CTRL_TYPE_STRING) {
-            ext_ctrl.size = ctrl->maximum + 1;
-            // FIXMEEEEext_ctrl.string = control->string;
-        }
-#endif
-        ext_ctrls.count = 1;
-        ext_ctrls.controls = &ext_ctrl;
-        ret = xioctl(vd->fd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
-        if(ret) {
-            DBG("control id: 0x%08x failed to get value (error %i)\n", ext_ctrl.id, ret);
-        } else {
-            switch(ctrl->type)
-            {
-#ifdef V4L2_CTRL_TYPE_STRING
-                case V4L2_CTRL_TYPE_STRING:
-                    //string gets set on VIDIOC_G_EXT_CTRLS
-                    //add the maximum size to value
-                    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = ext_ctrl.size;
-                    break;
-#endif
-                case V4L2_CTRL_TYPE_INTEGER64:
-                    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = ext_ctrl.value64;
-                    break;
-                default:
-                    pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = ext_ctrl.value;
-                    break;
-            }
-        }
-    }
-
-    pglobal->in[id].parametercount++;
-};
-
-/*  It should set the capture resolution
-    Cheated from the openCV cap_libv4l.cpp the method is the following:
-    Turn off the stream (video_disable)
-    Unmap buffers
-    Close the filedescriptor
-    Initialize the camera again with the new resolution
-*/
-int setResolution(struct vdIn *vd, int width, int height)
-{
-    int ret;
-    DBG("setResolution(%d, %d)\n", width, height);
-
-    vd->streamingState = STREAMING_PAUSED;
-    if(video_disable(vd, STREAMING_PAUSED) == 0) {  // do streamoff
-        DBG("Unmap buffers\n");
-        int i;
-        for(i = 0; i < NB_BUFFER; i++)
-            munmap(vd->mem[i], vd->buf.length);
-
-        if(CLOSE_VIDEO(vd->fd) == 0) {
-            DBG("Device closed successfully\n");
-        }
-
-        vd->width = width;
-        vd->height = height;
-        if(init_v4l2(vd) < 0) {
-            fprintf(stderr, " Init v4L2 failed !! exit fatal \n");
-            return -1;
-        } else {
-            DBG("reinit done\n");
-            video_enable(vd);
-            return 0;
-        }
-    } else {
-        DBG("Unable to disable streaming\n");
-        return -1;
-    }
-    return ret;
 }
 
-void enumerateControls(struct vdIn *vd, globals *pglobal, int id)
+int v4l2ResetPan(struct vdIn *vd)
 {
-    // enumerating v4l2 controls
-    struct v4l2_queryctrl ctrl;
-    pglobal->in[id].parametercount = 0;
-    pglobal->in[id].in_parameters = NULL;
-    /* Enumerate the v4l2 controls
-     Try the extended control API first */
-#ifdef V4L2_CTRL_FLAG_NEXT_CTRL
-    DBG("V4L2 API's V4L2_CTRL_FLAG_NEXT_CTRL is supported\n");
-    ctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL;
-    if(0 == IOCTL_VIDEO(vd->fd, VIDIOC_QUERYCTRL, &ctrl)) {
-        do {
-            control_readed(vd, &ctrl, pglobal, id);
-            ctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
-        } while(0 == IOCTL_VIDEO(vd->fd, VIDIOC_QUERYCTRL, &ctrl));
-        // note: use simple ioctl or v4l2_ioctl instead of the xioctl
-    } else
+	int control = V4L2_CID_PAN_RESET;
+	struct v4l2_control control_s;
+	struct v4l2_queryctrl queryctrl;
+	int err;
+
+	if (isv4l2Control(vd, control, &queryctrl) < 0)
+		return -1;
+
+	control_s.id = control;
+	control_s.value = 1;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+		printf("ERROR: Unable to reset pan (error = %d)\n", errno);
+		return -1;
+	}
+
+	return 0;
+}
+
+int v4l2ResetTilt(struct vdIn *vd)
+{
+	int control = V4L2_CID_TILT_RESET;
+	struct v4l2_control control_s;
+	struct v4l2_queryctrl queryctrl;
+	int err;
+
+	if (isv4l2Control(vd, control, &queryctrl) < 0)
+		return -1;
+
+	control_s.id = control;
+	control_s.value = 1;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+		printf("ERROR: Unable to reset tilt (error = %d)\n", errno);
+		return -1;
+	}
+
+	return 0;
+}
+
+int v4l2ResetPanTilt(struct vdIn *vd)
+{
+	int control = V4L2_CID_PANTILT_RESET;
+	struct v4l2_control control_s;
+	struct v4l2_queryctrl queryctrl;
+	unsigned char val;
+	int err;
+
+	if (isv4l2Control(vd, control, &queryctrl) < 0)
+		return -1;
+
+	control_s.id = control;
+	control_s.value = 3;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+		printf("ERROR: Unable to reset pan/tilt (error = %d)\n", errno);
+		return -1;
+	}
+
+	return 0;
+}
+
+int v4L2UpDownPan(struct vdIn *vd, short inc)
+{
+	int control = V4L2_CID_PAN_RELATIVE;
+	struct v4l2_control control_s;
+	struct v4l2_queryctrl queryctrl;
+	int err;
+
+	if (isv4l2Control(vd, control, &queryctrl) < 0)
+		return -1;
+	control_s.id = control;
+	control_s.value = inc;
+	if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+		printf("ioctl pan updown control error\n");
+		return -1;
+	}
+	return 0;
+}
+
+int v4L2UpDownTilt(struct vdIn *vd, short inc)
+{   int control = V4L2_CID_TILT_RELATIVE;
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int err;
+
+    if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;  
+    control_s.id = control;
+    control_s.value = inc;
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl tiltupdown control error\n");
+	return -1;
+    }
+    return 0;
+}
+
+int v4L2UpDownPanTilt(struct vdIn *vd, short inc_p, short inc_t) {
+  int p_control = V4L2_CID_PAN_RELATIVE;
+  int t_control = V4L2_CID_TILT_RELATIVE;
+  struct v4l2_ext_controls control_s_array;
+  struct v4l2_queryctrl queryctrl;
+  struct v4l2_ext_control control_s[2];
+  int err;
+
+  if(isv4l2Control(vd, p_control, &queryctrl) < 0 ||
+     isv4l2Control(vd, t_control, &queryctrl) < 0)
+    return -1;
+  control_s_array.count = 2;
+  control_s_array.ctrl_class = V4L2_CTRL_CLASS_USER;
+  control_s_array.reserved[0] = 0;
+  control_s_array.reserved[1] = 0;
+  control_s_array.controls = control_s;
+
+  control_s[0].id = p_control;
+  control_s[0].value = inc_p;
+  control_s[1].id = t_control;
+  control_s[1].value = inc_t;
+
+  if ((err = ioctl(vd->fd, VIDIOC_S_EXT_CTRLS, &control_s_array)) < 0) {
+    printf("ioctl pan-tilt updown control error\n");
+    return -1;
+  }
+  return 0;
+}
+
+#if 0
+
+union pantilt {
+	struct {
+		short pan;
+		short tilt;
+	} s16;
+	int value;
+} __attribute__((packed)) ;
+	
+int v4L2UpDownPan(struct vdIn *vd, short inc)
+{   int control = V4L2_CID_PANTILT_RELATIVE;
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int err;
+    
+   union pantilt pan;
+   
+       control_s.id = control;
+     if (isv4l2Control(vd, control, &queryctrl) < 0)
+        return -1;
+
+  pan.s16.pan = inc;
+  pan.s16.tilt = 0;
+ 
+	control_s.value = pan.value ;
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl pan updown control error\n");
+	return -1;
+	}
+	return 0;
+}
+
+int v4L2UpDownTilt(struct vdIn *vd, short inc)
+{   int control = V4L2_CID_PANTILT_RELATIVE;
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int err;
+     union pantilt pan;  
+       control_s.id = control;
+     if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;  
+
+    pan.s16.pan= 0;
+    pan.s16.tilt = inc;
+  
+	control_s.value = pan.value;
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl tiltupdown control error\n");
+	return -1;
+	}
+	return 0;
+}
 #endif
-    {
-        DBG("V4L2 API's V4L2_CTRL_FLAG_NEXT_CTRL is NOT supported\n");
-        /* Fall back on the standard API */
-        /* Check all the standard controls */
-        int i;
-        for(i = V4L2_CID_BASE; i < V4L2_CID_LASTP1; i++) {
-            ctrl.id = i;
-            if(IOCTL_VIDEO(vd->fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
-                control_readed(vd, &ctrl, pglobal, id);
-            }
-        }
 
-        /* Check any custom controls */
-        for(i = V4L2_CID_PRIVATE_BASE; ; i++) {
-            ctrl.id = i;
-            if(IOCTL_VIDEO(vd->fd, VIDIOC_QUERYCTRL, &ctrl) == 0) {
-                control_readed(vd, &ctrl, pglobal, id);
-            } else {
-                break;
-            }
-        }
-    }
+int v4l2SetLightFrequencyFilter(struct vdIn *vd, int flt) 
+{   int control = V4L2_CID_POWER_LINE_FREQUENCY;
+    struct v4l2_control control_s;
+    struct v4l2_queryctrl queryctrl;
+    int err;
+       control_s.id = control;
+     if (isv4l2Control(vd, control, &queryctrl) < 0)
+	return -1;  
 
-    memset(&pglobal->in[id].jpegcomp, 0, sizeof(struct v4l2_jpegcompression));
-    if(xioctl(vd->fd, VIDIOC_G_JPEGCOMP, &pglobal->in[id].jpegcomp) != EINVAL) {
-        DBG("JPEG compression details:\n");
-        DBG("Quality: %d\n", pglobal->in[id].jpegcomp.quality);
-        DBG("APPn: %d\n", pglobal->in[id].jpegcomp.APPn);
-        DBG("APP length: %d\n", pglobal->in[id].jpegcomp.APP_len);
-        DBG("APP data: %s\n", pglobal->in[id].jpegcomp.APP_data);
-        DBG("COM length: %d\n", pglobal->in[id].jpegcomp.COM_len);
-        DBG("COM data: %s\n", pglobal->in[id].jpegcomp.COM_data);
-        struct v4l2_queryctrl ctrl_jpeg;
-        ctrl_jpeg.id = 1;
-        sprintf((char*)&ctrl_jpeg.name, "JPEG quality");
-        ctrl_jpeg.minimum = 0;
-        ctrl_jpeg.maximum = 100;
-        ctrl_jpeg.step = 1;
-        ctrl_jpeg.default_value = 50;
-        ctrl_jpeg.flags = 0;
-        ctrl_jpeg.type = V4L2_CTRL_TYPE_INTEGER;
-        if (pglobal->in[id].in_parameters == NULL) {
-            pglobal->in[id].in_parameters = (control*)calloc(1, sizeof(control));
-        } else {
-            pglobal->in[id].in_parameters = (control*)realloc(pglobal->in[id].in_parameters,(pglobal->in[id].parametercount + 1) * sizeof(control));
-        }
+       control_s.value = flt;
 
-        if (pglobal->in[id].in_parameters == NULL) {
-            DBG("Calloc/realloc failed\n");
-            return;
-        }
+    if ((err = ioctl(vd->fd, VIDIOC_S_CTRL, &control_s)) < 0) {
+	printf("ioctl set_light_frequency_filter error\n");
+	return -1;
+	}
+	return 0;
+}
+int enum_frame_intervals(int dev, __u32 pixfmt, __u32 width, __u32 height)
+{
+	int ret;
+	struct v4l2_frmivalenum fival;
 
-        memcpy(&pglobal->in[id].in_parameters[pglobal->in[id].parametercount].ctrl, &ctrl_jpeg, sizeof(struct v4l2_queryctrl));
-        pglobal->in[id].in_parameters[pglobal->in[id].parametercount].group = IN_CMD_JPEG_QUALITY;
-        pglobal->in[id].in_parameters[pglobal->in[id].parametercount].value = pglobal->in[id].jpegcomp.quality;
-        pglobal->in[id].parametercount++;
-    } else {
-        DBG("Modifying the setting of the JPEG compression is not supported\n");
-        pglobal->in[id].jpegcomp.quality = -1;
-    }
+	memset(&fival, 0, sizeof(fival));
+	fival.index = 0;
+	fival.pixel_format = pixfmt;
+	fival.width = width;
+	fival.height = height;
+	printf("\tTime interval between frame: ");
+	while ((ret = ioctl(dev, VIDIOC_ENUM_FRAMEINTERVALS, &fival)) == 0) {
+		if (fival.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
+				printf("%u/%u, ",
+						fival.discrete.numerator, fival.discrete.denominator);
+		} else if (fival.type == V4L2_FRMIVAL_TYPE_CONTINUOUS) {
+				printf("{min { %u/%u } .. max { %u/%u } }, ",
+						fival.stepwise.min.numerator, fival.stepwise.min.numerator,
+						fival.stepwise.max.denominator, fival.stepwise.max.denominator);
+				break;
+		} else if (fival.type == V4L2_FRMIVAL_TYPE_STEPWISE) {
+				printf("{min { %u/%u } .. max { %u/%u } / "
+						"stepsize { %u/%u } }, ",
+						fival.stepwise.min.numerator, fival.stepwise.min.denominator,
+						fival.stepwise.max.numerator, fival.stepwise.max.denominator,
+						fival.stepwise.step.numerator, fival.stepwise.step.denominator);
+				break;
+		}
+		fival.index++;
+	}
+	printf("\n");
+	if (ret != 0 && errno != EINVAL) {
+		perror("ERROR enumerating frame intervals");
+		return errno;
+	}
 
+	return 0;
+}
+int enum_frame_sizes(int dev, __u32 pixfmt)
+{
+	int ret;
+	struct v4l2_frmsizeenum fsize;
+
+	memset(&fsize, 0, sizeof(fsize));
+	fsize.index = 0;
+	fsize.pixel_format = pixfmt;
+	while ((ret = ioctl(dev, VIDIOC_ENUM_FRAMESIZES, &fsize)) == 0) {
+		if (fsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+			printf("{ discrete: width = %u, height = %u }\n",
+					fsize.discrete.width, fsize.discrete.height);
+			ret = enum_frame_intervals(dev, pixfmt,
+					fsize.discrete.width, fsize.discrete.height);
+			if (ret != 0)
+				printf("  Unable to enumerate frame sizes.\n");
+		} else if (fsize.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) {
+			printf("{ continuous: min { width = %u, height = %u } .. "
+					"max { width = %u, height = %u } }\n",
+					fsize.stepwise.min_width, fsize.stepwise.min_height,
+					fsize.stepwise.max_width, fsize.stepwise.max_height);
+			printf("  Refusing to enumerate frame intervals.\n");
+			break;
+		} else if (fsize.type == V4L2_FRMSIZE_TYPE_STEPWISE) {
+			printf("{ stepwise: min { width = %u, height = %u } .. "
+					"max { width = %u, height = %u } / "
+					"stepsize { width = %u, height = %u } }\n",
+					fsize.stepwise.min_width, fsize.stepwise.min_height,
+					fsize.stepwise.max_width, fsize.stepwise.max_height,
+					fsize.stepwise.step_width, fsize.stepwise.step_height);
+			printf("  Refusing to enumerate frame intervals.\n");
+			break;
+		}
+		fsize.index++;
+	}
+	if (ret != 0 && errno != EINVAL) {
+		perror("ERROR enumerating frame sizes");
+		return errno;
+	}
+
+	return 0;
+}
+
+int enum_frame_formats(int dev, unsigned int *supported_formats, unsigned int max_formats)
+{
+	int ret;
+	struct v4l2_fmtdesc fmt;
+
+	memset(&fmt, 0, sizeof(fmt));
+	fmt.index = 0;
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	while ((ret = ioctl(dev, VIDIOC_ENUM_FMT, &fmt)) == 0) {
+		if(supported_formats == NULL) {
+			printf("{ pixelformat = '%c%c%c%c', description = '%s' }\n",
+					fmt.pixelformat & 0xFF, (fmt.pixelformat >> 8) & 0xFF,
+					(fmt.pixelformat >> 16) & 0xFF, (fmt.pixelformat >> 24) & 0xFF,
+					fmt.description);
+			ret = enum_frame_sizes(dev, fmt.pixelformat);
+			if(ret != 0)
+				printf("  Unable to enumerate frame sizes.\n");
+		}
+		else if(fmt.index < max_formats) {
+			supported_formats[fmt.index] = fmt.pixelformat;
+		}
+
+		fmt.index++;
+	}
+	if (errno != EINVAL) {
+		perror("ERROR enumerating frame formats");
+		return errno;
+	}
+
+	return 0;
 }

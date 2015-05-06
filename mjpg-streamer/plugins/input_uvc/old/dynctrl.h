@@ -23,7 +23,7 @@
 #define V4L2_DYNA_CTRLS_H
 
 #include <linux/videodev2.h>
-//#include "v4l2uvc.h"
+#include "v4l2uvc.h"
 /*
  * Dynamic controls
  */
@@ -49,11 +49,9 @@
 #define V4L2_CID_RAW_BITS_PER_PIXEL_LOGITECH        V4L2_CID_BASE_LOGITECH+0x71
 #define V4L2_CID_LAST_EXTCTR                V4L2_CID_RAW_BITS_PER_PIXEL_LOGITECH
 
-/*
 #define UVC_GUID_LOGITECH_VIDEO_PIPE        {0x82, 0x06, 0x61, 0x63, 0x70, 0x50, 0xab, 0x49, 0xb8, 0xcc, 0xb3, 0x85, 0x5e, 0x8d, 0x22, 0x50}
 #define UVC_GUID_LOGITECH_MOTOR_CONTROL     {0x82, 0x06, 0x61, 0x63, 0x70, 0x50, 0xab, 0x49, 0xb8, 0xcc, 0xb3, 0x85, 0x5e, 0x8d, 0x22, 0x56}
 #define UVC_GUID_LOGITECH_USER_HW_CONTROL   {0x82, 0x06, 0x61, 0x63, 0x70, 0x50, 0xab, 0x49, 0xb8, 0xcc, 0xb3, 0x85, 0x5e, 0x8d, 0x22, 0x1f}
-*/
 
 #define XU_HW_CONTROL_LED1          1
 #define XU_MOTORCONTROL_PANTILT_RELATIVE    1
@@ -76,7 +74,7 @@
 #define UVC_CONTROL_GET_RANGE   (UVC_CONTROL_GET_CUR | UVC_CONTROL_GET_MIN | \
                                  UVC_CONTROL_GET_MAX | UVC_CONTROL_GET_RES | \
                                  UVC_CONTROL_GET_DEF)
-/*
+
 struct uvc_xu_control_info {
     __u8 entity[16];
     __u8 index;
@@ -110,6 +108,5 @@ struct uvc_xu_control {
 #define UVCIOC_CTRL_SET     _IOW('U', 4, struct uvc_xu_control)
 
 int initDynCtrls(int fd);
-*/
 
 #endif
